@@ -1,0 +1,172 @@
+name: ts-headroom-stack
+
+services:
+  # ── Tailscale gateway ──────────────────────────────────────────────
+  # Single point of entry. mitmproxy + webserver share its
+  # network namespace (network_mode: service:tailscale) and are thus
+  # reachable only via the Tailscale IP / MagicDNS.
+  tailscale:
+    image: tailscale/tailscale:latest
+    container_name: ts-gateway
+    hostname: ${TS_HOSTNAME:-headroom-stack}
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY}
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_USERSPACE=false
+      # The gateway must NEVER take over tailnet DNS: resolv.conf must stay on
+      # Docker's embedded DNS (127.0.0.11), otherwise container names
+      # (headroom) and external resolution break in the shared netns ->
+      # mitmproxy 502 "Temporary failure in name resolution".
+      - TS_ACCEPT_DNS=false
+      - TS_EXTRA_ARGS=--advertise-tags=${TS_TAGS:-tag:headroom}
+    volumes:
+      - ts-state:/var/lib/tailscale
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+    networks:
+      - backend # access to headroom (for mitmproxy/webserver in the shared netns)
+      - egress # Tailscale coordination/DERP
+    healthcheck:
+      test: ["CMD-SHELL", "tailscale status --peers=false >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
+  # ── Headroom AI proxy ──────────────────────────────────────────────
+  # NO published ports, NO access from the tailnet to /v1/*.
+  # The API path is only reachable via mitmproxy; the dashboard is read-only via webserver.
+  # Configuration: headroom/headroom.env.example (cache mode, model router, TOIN).
+  # Official image, code-nonroot variant: extras proxy,code (tree-sitter
+  # CodeCompressor for JS/TS/Java/Kotlin/PHP/Go tool output), non-root user,
+  # Debian-slim base (shell/Python -> healthcheck & debugging work).
+  # Pin by digest in production: code-nonroot@sha256:...
+  # Non-root + named volume: /data must be owned by the image user -> see README.
+  headroom:
+    image: ghcr.io/headroomlabs-ai/headroom:code-nonroot
+    container_name: headroom
+    # Boot-race fix: only start once the Tailscale gateway is actually up;
+    # restart:true (Compose >= 2.17) restarts headroom too if Tailscale
+    # restarts. Prevents the persistent unhealthy state after the
+    # nightly 04:30 reboot (the http_client check never recovered on its own).
+    depends_on:
+      tailscale:
+        condition: service_healthy
+        restart: true
+    # autoheal watchdog restarts containers that are persistently unhealthy
+    # (Docker itself does not do this) - catches e.g. node key expiry in the middle of the night.
+    labels:
+      - autoheal=true
+    env_file:
+      - ./headroom/headroom.env
+    # The image's entrypoint is already `headroom proxy` -> command contains
+    # ONLY arguments (don't prepend "headroom proxy" or it doubles up ->
+    # crash on startup). Host/port come from headroom.env.
+    # --learn: build TOIN models from tool-output patterns (persisted in /data)
+    command: ["--learn"]
+    volumes:
+      - headroom-data:/data
+    networks:
+      - backend # internal only
+      - egress # upstream: api.anthropic.com
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8787/readyz')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 120s # don't count the boot phase (network setup, state load) as a failure
+    restart: unless-stopped
+
+  # ── MITM proxy (mitmproxy) ─────────────────────────────────────────
+  # Explicit HTTP(S) proxy on the tailnet on port 8080.
+  # allow_hosts: only the three LLM API hosts are intercepted, everything
+  # else (platform.claude.com, mcp-proxy.anthropic.com, ...) stays a
+  # plain TCP tunnel without CA trust.
+  # Addon: POST /v1/messages, /v1/chat/completions and Gemini
+  # :generateContent -> headroom:8787, rest passthrough (streams).
+  mitmproxy:
+    image: mitmproxy/mitmproxy:latest
+    container_name: mitmproxy
+    network_mode: service:tailscale
+    depends_on:
+      tailscale:
+        condition: service_healthy
+        restart: true # shared netns: restart together with Tailscale
+      headroom:
+        condition: service_healthy
+    command: >
+      mitmdump
+      --mode regular
+      --listen-port 8080
+      --set block_global=false
+      --allow-hosts '^(api\.anthropic\.com|api\.openai\.com|generativelanguage\.googleapis\.com):443$'
+      -s /addons/redirect_headroom.py
+    volumes:
+      - ./mitmproxy/redirect_headroom.py:/addons/redirect_headroom.py:ro
+      - mitm-certs:/home/mitmproxy/.mitmproxy
+    restart: unless-stopped
+
+  # ── Webserver (dashboard + root CA download) ───────────────────────
+  # Port 80 on the tailnet. Reverse proxy only to Headroom's dashboard/stats
+  # endpoints (not to /v1/*), plus CA download.
+  # On startup, copies html + CA into docroot as root (chmod a+rX):
+  # makes the service immune to restrictive host permissions on the
+  # bind mounts (e.g. chmod go-rwx in the deploy) and to 0700 on the
+  # mitm-certs volume — nginx workers run unprivileged (403 otherwise).
+  webserver:
+    image: nginx:alpine
+    container_name: webserver
+    network_mode: service:tailscale
+    depends_on:
+      tailscale:
+        condition: service_healthy
+        restart: true # shared netns: restart together with Tailscale
+      headroom:
+        condition: service_healthy
+    volumes:
+      - ./webserver/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./webserver/html:/src/html:ro
+      - mitm-certs:/src/ca:ro
+    command: >
+      sh -c '
+      cp -r /src/html/. /usr/share/nginx/html/ &&
+      chmod -R a+rX /usr/share/nginx/html &&
+      mkdir -p /usr/share/nginx/ca &&
+      ( i=0; while [ $$i -lt 90 ] && [ ! -f /src/ca/mitmproxy-ca-cert.pem ]; do i=$$((i+1)); sleep 2; done;
+        cp /src/ca/mitmproxy-ca-cert.* /usr/share/nginx/ca/ 2>/dev/null;
+        chmod -R a+rX /usr/share/nginx/ca ) &
+      exec nginx -g "daemon off;"'
+    restart: unless-stopped
+
+  # ── Autoheal watchdog ──────────────────────────────────────────────
+  # Restarts containers labeled autoheal=true as soon as they become unhealthy.
+  # Docker alone does NOT restart unhealthy containers. Needs docker.sock
+  # (root-equivalent access - a deliberate trade-off for self-healing
+  # on the unattended host).
+  autoheal:
+    image: willfarrell/autoheal
+    container_name: autoheal
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=autoheal
+      - AUTOHEAL_INTERVAL=30
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    network_mode: none
+    restart: unless-stopped
+
+networks:
+  backend:
+    internal: true # no egress, not reachable from outside
+  egress: {} # normal bridge for upstream traffic
+
+# Persistence: named volumes (Docker-managed, no host preparation needed)
+#   ts-state       – Tailscale node state/keys
+#   headroom-data  – workspace (savings history, TOIN, TTL observations)
+#   mitm-certs     – root CA & keys (webserver mounts it read-only)
+volumes:
+  ts-state:
+  headroom-data:
+  mitm-certs:

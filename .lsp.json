@@ -1,0 +1,34 @@
+{
+  "htmlls": {
+    "command": "npx",
+    "args": ["-y", "-p", "vscode-langservers-extracted@4.10.0", "vscode-html-languageserver", "--stdio"],
+    "extensionToLanguage": {
+      ".html": "html"
+    },
+    "startupTimeout": 60000
+  },
+  "pylsp": {
+    "command": "pylsp",
+    "args": [],
+    "extensionToLanguage": {
+      ".py": "python"
+    },
+    "startupTimeout": 60000
+  },
+  "yamlls": {
+    "command": "npx",
+    "args": ["-y", "yaml-language-server@1.15.0", "--stdio"],
+    "extensionToLanguage": {
+      ".yml": "yaml"
+    },
+    "startupTimeout": 60000
+  },
+  "marksman": {
+    "command": "marksman",
+    "args": ["server"],
+    "extensionToLanguage": {
+      ".md": "markdown"
+    },
+    "startupTimeout": 60000
+  }
+}
