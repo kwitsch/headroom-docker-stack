@@ -68,7 +68,7 @@ Backup e.g. via `docker run --rm -v ts-headroom-stack_mitm-certs:/v -v $PWD:/b a
 The three first-party services (`headroom`, `mitmproxy`, `webserver`) are self-contained images
 built from their per-service `Dockerfile` and versioned by a `VERSION` file. On push to `main`, CI
 (`.github/workflows/build-images.yml`) builds and publishes
-`ghcr.io/kwitsch/headroom-docker-stack/<service>:<version>` (and `:latest`) for each service whose
+`ghcr.io/kwitsch/headroom-docker-stack/<service>:<version>` for each service whose
 `VERSION` changed. To ship a change: edit the service's files, bump `<service>/VERSION`, and bump
 the matching `image:` tag in `docker-compose.yml` in the same PR. After CI publishes, roll forward
 with `docker compose pull <service> && docker compose up -d <service>`. `tailscale` and `autoheal`
