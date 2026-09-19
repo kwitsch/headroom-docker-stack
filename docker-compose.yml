@@ -39,14 +39,14 @@ services:
   # ── Headroom AI proxy ──────────────────────────────────────────────
   # NO published ports, NO access from the tailnet to /v1/*.
   # The API path is only reachable via mitmproxy; the dashboard is read-only via webserver.
-  # Configuration: headroom/headroom.env.example (cache mode, model router, TOIN).
-  # Official image, code-nonroot variant: extras proxy,code (tree-sitter
-  # CodeCompressor for JS/TS/Java/Kotlin/PHP/Go tool output), non-root user,
-  # Debian-slim base (shell/Python -> healthcheck & debugging work).
-  # Pin by digest in production: code-nonroot@sha256:...
+  # Configuration is baked into the image (headroom/Dockerfile ENV block:
+  # cache mode, model router, TOIN). Retuning needs a VERSION bump + rebuild.
+  # Built from headroom/Dockerfile on top of the official code-nonroot variant
+  # (extras proxy,code -> tree-sitter CodeCompressor; non-root; Debian-slim
+  # base so shell/Python work for the healthcheck).
   # Non-root + named volume: /data must be owned by the image user -> see README.
   headroom:
-    image: ghcr.io/headroomlabs-ai/headroom:code-nonroot
+    image: ghcr.io/kwitsch/headroom-docker-stack/headroom:1.0.0
     container_name: headroom
     # Boot-race fix: only start once the Tailscale gateway is actually up;
     # restart:true (Compose >= 2.17) restarts headroom too if Tailscale
@@ -60,11 +60,9 @@ services:
     # (Docker itself does not do this) - catches e.g. node key expiry in the middle of the night.
     labels:
       - autoheal=true
-    env_file:
-      - ./headroom/headroom.env
     # The image's entrypoint is already `headroom proxy` -> command contains
     # ONLY arguments (don't prepend "headroom proxy" or it doubles up ->
-    # crash on startup). Host/port come from headroom.env.
+    # crash on startup). Host/port come from the image ENV (headroom/Dockerfile).
     # --learn: build TOIN models from tool-output patterns (persisted in /data)
     command: ["--learn"]
     volumes:
@@ -88,9 +86,16 @@ services:
   # Addon: POST /v1/messages, /v1/chat/completions and Gemini
   # :generateContent -> headroom:8787, rest passthrough (streams).
   mitmproxy:
-    image: mitmproxy/mitmproxy:latest
+    image: ghcr.io/kwitsch/headroom-docker-stack/mitmproxy:1.0.0
     container_name: mitmproxy
     network_mode: service:tailscale
+    # Optional routing toggles (the baked addon defaults each to "1" when
+    # unset). Baking the addon removed the edit-the-mount path, so expose
+    # them here for runtime toggling without a rebuild.
+    environment:
+      - MITM_ROUTE_HEADROOM=${MITM_ROUTE_HEADROOM:-1}
+      - MITM_ROUTE_OPENAI=${MITM_ROUTE_OPENAI:-1}
+      - MITM_ROUTE_GEMINI=${MITM_ROUTE_GEMINI:-1}
     depends_on:
       tailscale:
         condition: service_healthy
@@ -105,19 +110,17 @@ services:
       --allow-hosts '^(api\.anthropic\.com|api\.openai\.com|generativelanguage\.googleapis\.com):443$'
       -s /addons/redirect_headroom.py
     volumes:
-      - ./mitmproxy/redirect_headroom.py:/addons/redirect_headroom.py:ro
       - mitm-certs:/home/mitmproxy/.mitmproxy
     restart: unless-stopped
 
   # ── Webserver (dashboard + root CA download) ───────────────────────
   # Port 80 on the tailnet. Reverse proxy only to Headroom's dashboard/stats
   # endpoints (not to /v1/*), plus CA download.
-  # On startup, copies html + CA into docroot as root (chmod a+rX):
-  # makes the service immune to restrictive host permissions on the
-  # bind mounts (e.g. chmod go-rwx in the deploy) and to 0700 on the
-  # mitm-certs volume — nginx workers run unprivileged (403 otherwise).
+  # nginx.conf + html/ are baked into the image (webserver/Dockerfile), root-
+  # owned and world-readable. Only the CA copy stays runtime: the mitm-certs
+  # volume is populated by mitmproxy at run time and cannot be baked.
   webserver:
-    image: nginx:alpine
+    image: ghcr.io/kwitsch/headroom-docker-stack/webserver:1.0.0
     container_name: webserver
     network_mode: service:tailscale
     depends_on:
@@ -127,13 +130,9 @@ services:
       headroom:
         condition: service_healthy
     volumes:
-      - ./webserver/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./webserver/html:/src/html:ro
       - mitm-certs:/src/ca:ro
     command: >
       sh -c '
-      cp -r /src/html/. /usr/share/nginx/html/ &&
-      chmod -R a+rX /usr/share/nginx/html &&
       mkdir -p /usr/share/nginx/ca &&
       ( i=0; while [ $$i -lt 90 ] && [ ! -f /src/ca/mitmproxy-ca-cert.pem ]; do i=$$((i+1)); sleep 2; done;
         cp /src/ca/mitmproxy-ca-cert.* /usr/share/nginx/ca/ 2>/dev/null;

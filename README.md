@@ -37,10 +37,17 @@ Isolation:
 .
 ├── docker-compose.yml
 ├── .env.example
+├── .github/workflows/build-images.yml  # CI: build + publish to GHCR on VERSION change
 ├── headroom/
-│   └── headroom.env.example         # Cache mode, model router, TOIN (team-plan-optimized)
-├── mitmproxy/redirect_headroom.py  # Path routing: only POST /v1/messages → Headroom
+│   ├── Dockerfile                   # bakes the 24 HEADROOM_* settings as ENV
+│   └── VERSION
+├── mitmproxy/
+│   ├── Dockerfile                   # bakes redirect_headroom.py
+│   ├── VERSION
+│   └── redirect_headroom.py         # path routing: only POST /v1/messages → Headroom
 └── webserver/
+    ├── Dockerfile                   # bakes nginx.conf + html/
+    ├── VERSION
     ├── nginx.conf
     └── html/index.html
 ```
@@ -55,6 +62,17 @@ Isolation:
 
 Docker-managed — no host preparation or chown needed.
 Backup e.g. via `docker run --rm -v ts-headroom-stack_mitm-certs:/v -v $PWD:/b alpine tar czf /b/mitm-certs.tgz -C /v .`
+
+## Building & versioning
+
+The three first-party services (`headroom`, `mitmproxy`, `webserver`) are self-contained images
+built from their per-service `Dockerfile` and versioned by a `VERSION` file. On push to `main`, CI
+(`.github/workflows/build-images.yml`) builds and publishes
+`ghcr.io/kwitsch/headroom-docker-stack/<service>:<version>` for each service whose
+`VERSION` changed. To ship a change: edit the service's files, bump `<service>/VERSION`, and bump
+the matching `image:` tag in `docker-compose.yml` in the same PR. After CI publishes, roll forward
+with `docker compose pull <service> && docker compose up -d <service>`. `tailscale` and `autoheal`
+keep their upstream images and have no Dockerfile/VERSION.
 
 ## Multi-provider (Anthropic, OpenAI, Gemini)
 
@@ -88,14 +106,16 @@ Remote Control SSE channel on api.anthropic.com stalls and breaks. Only exactly
 
 ## Headroom image
 
-Variant: `ghcr.io/headroomlabs-ai/headroom:code-nonroot`
-(extras `proxy,code` → tree-sitter CodeCompressor; non-root; Debian-slim base).
+Built from `headroom/Dockerfile` and published as
+`ghcr.io/kwitsch/headroom-docker-stack/headroom:<version>`. The image bakes the 24 `HEADROOM_*`
+settings as `ENV` lines (retuning needs a `VERSION` bump + CI rebuild + compose tag bump). Its
+base is the official `code-nonroot` variant (extras `proxy,code` → tree-sitter CodeCompressor;
+non-root; Debian-slim base), pinned by digest:
 
-- **Pinning:** Versioned tags only exist for the base variant; for
-  `code-nonroot`, pin by digest:
+- **Base pinning:** for `code-nonroot`, pin by digest in the Dockerfile `FROM`:
   `docker pull ghcr.io/headroomlabs-ai/headroom:code-nonroot`
-  → take the digest from `docker inspect --format '{{index .RepoDigests 0}}' ...`
-  and put it into Compose (`image: ...@sha256:...`).
+  → take `docker inspect --format '{{index .RepoDigests 0}}' ...` and put `@sha256:...` in
+  `headroom/Dockerfile`.
 - **Volume ownership (non-root):** If `/data` is not writable on first start
   (root-owned volume), determine the image user's uid and
   chown the volume once:
@@ -127,16 +147,11 @@ On the systemd side (installer, not this repo): `After=network-online.target`
 
 ## Known gotcha: 403 Forbidden
 
-nginx workers run unprivileged. Two causes previously led to 403:
-
-1. Restrictive host permissions on the bind mounts (e.g. `chmod -R go-rwx`
-   in the deploy directory) — workers couldn't read `webserver/html/`.
-2. The `mitm-certs` volume with 0700 permissions owned by the mitmproxy user — workers couldn't
-   enter the CA directory.
-
-Fix in Compose: on startup, the webserver copies html + CA into the
-docroot as root and sets `a+rX` (waits in a loop until mitmproxy has generated
-the CA, max. 3 min). If the CA is rotated, restart the webserver
+nginx workers run unprivileged. `nginx.conf` and `html/` are now baked into the image
+(root-owned, world-readable `COPY` layers), so the old bind-mount-permission 403 vector is gone.
+One runtime path remains: the `mitm-certs` volume (0700, owned by the mitmproxy user) — the
+webserver copies the CA into its docroot as root and `chmod a+rX`s it on startup, waiting in a loop
+(max ~3 min) until mitmproxy has generated the CA. If the CA is rotated, restart the webserver
 (`docker compose restart webserver`).
 
 ## Setup
