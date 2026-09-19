@@ -8,6 +8,8 @@ nginx (`nginx.conf` + `html/`) reverse-proxies only `/dashboard`, `/stats*`, `/m
 `/livez`, `/readyz` to `headroom:8787` (never `/v1/*`), and serves the mitmproxy root CA under
 `/ca/`.
 
-On container start it copies `html/` + the CA cert into the docroot as root and `chmod a+rX`s them,
-working around restrictive bind-mount/volume permissions that otherwise cause 403s for the
-unprivileged nginx worker.
+`nginx.conf` and `html/` are baked into the image (`webserver/Dockerfile`), root-owned and
+world-readable, so the old html-copy + `chmod` workaround (and its 403 bind-mount-permission
+vector) is gone. Only the CA copy stays a runtime step in the compose `command:`: the `mitm-certs`
+volume is populated by mitmproxy at run time and cannot be baked. If the CA is rotated, restart the
+webserver (`docker compose restart webserver`).
