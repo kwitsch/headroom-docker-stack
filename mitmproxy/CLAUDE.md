@@ -12,5 +12,7 @@ to `headroom:8787`, rewriting the connection target but preserving the original 
 Routed requests are buffered; passthrough traffic and all `text/event-stream` responses **must**
 stream — buffering SSE breaks Claude Code's Remote Control channel.
 
-Each provider route is independently toggleable via `MITM_ROUTE_HEADROOM` / `MITM_ROUTE_OPENAI` /
-`MITM_ROUTE_GEMINI` env vars, no file change needed.
+The addon is baked into the image (`mitmproxy/Dockerfile`, `COPY redirect_headroom.py
+/addons/redirect_headroom.py`); editing routing logic requires a `VERSION` bump + CI rebuild. Each
+provider route stays runtime-toggleable via the `MITM_ROUTE_HEADROOM` / `MITM_ROUTE_OPENAI` /
+`MITM_ROUTE_GEMINI` env vars (compose `environment:`, defaulting to `1`), no rebuild needed.

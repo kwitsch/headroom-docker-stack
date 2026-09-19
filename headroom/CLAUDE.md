@@ -9,6 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `mitmproxy` (API path) and `webserver` (dashboard, read-only) can reach it, via the `backend`
 network.
 
-All of its behavior (cache mode, model routing, rate limiting, output shaping) is configured
-through `headroom.env` (copied from `headroom.env.example`), which is heavily commented with the
-reasoning behind each setting — read it before changing anything there.
+All of its behavior (cache mode, model routing, rate limiting, output shaping) is baked into the
+image as `ENV` lines in `headroom/Dockerfile`, each preceded by the reasoning behind the setting —
+read those comments before changing anything. Retuning a setting requires a `VERSION` bump + CI
+rebuild (and a matching `image:` tag bump in `docker-compose.yml`), not a live edit.

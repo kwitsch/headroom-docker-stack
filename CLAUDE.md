@@ -16,15 +16,15 @@ This repository is maintained in English. All text must be written in English, i
 
 A Docker Compose stack (`ts-headroom-stack`) that exposes a Headroom AI proxy (for Claude Code /
 Anthropic / OpenAI / Gemini API traffic) on a private Tailscale tailnet, with mitmproxy doing the
-TLS interception/routing and nginx serving a dashboard + CA download page. There is no application
-source to build — this repo is entirely Docker Compose config, one nginx config, one Python
-mitmproxy addon, and env templates.
+TLS interception/routing and nginx serving a dashboard + CA download page. The three first-party
+services (headroom, mitmproxy, webserver) are built from per-service Dockerfiles versioned by a
+VERSION file and published to this repo's GHCR by CI; tailscale and autoheal stay on upstream
+images.
 
 ## Commands
 
 ```bash
-cp .env.example .env                     # fill in TS_AUTHKEY, then...
-cp headroom/headroom.env.example headroom/headroom.env   # copy the Headroom config template
+cp .env.example .env                     # fill in TS_AUTHKEY
 docker compose up -d                     # start the stack
 docker compose config                    # validate/render the compose file (closest thing to a lint)
 docker compose logs -f <service>         # tail logs: tailscale | headroom | mitmproxy | webserver | autoheal
@@ -32,9 +32,14 @@ docker compose restart webserver         # required after the mitmproxy CA rotat
 docker compose down                      # stop the stack
 ```
 
-There is no build step, linter, or test suite in this repo. Verify changes by bringing the stack
-up and exercising the real endpoints (see "Endpoints" below) or `docker exec headroom headroom
-output-savings` for the output-shaper.
+Images are built by CI (`.github/workflows/build-images.yml`) on push to `main`
+when a service's `VERSION` changes, and published to
+`ghcr.io/kwitsch/headroom-docker-stack/<service>`. To ship a change to a
+first-party service: edit its files, bump `<service>/VERSION`, bump the matching
+`image:` tag in `docker-compose.yml` in the same PR. There is no linter or test
+suite; validate compose with `docker compose config`, and verify runtime by
+bringing the stack up and exercising the real endpoints (see "Endpoints") or
+`docker exec headroom headroom output-savings` for the output-shaper.
 
 ## Architecture
 
